@@ -1,0 +1,361 @@
+# وصف قاعدة البيانات - EyeAttend
+
+تم استخراج هذا الوصف من ملف قاعدة البيانات المرفق `DB.txt`، ويعرض هيكل الجداول، عددها، والعلاقات بينها.
+
+## 1. ملخص سريع
+
+- إجمالي الجداول في قاعدة البيانات: 45 جدول
+- الجداول التطبيقية (نظام المشروع): 35 جدول
+- الجداول الإطار Django / النظام: 10 جداول
+
+### توزيع الجداول
+
+| الفئة | العدد | الملاحظات |
+|---|---:|---|
+| الجداول التطبيقية | 35 | جداول المشروع نفسه |
+| جداول Django الداخلية | 10 | auth، sessions، migrations، admin |
+| الإجمالي | 45 | جميع الجداول في قاعدة البيانات |
+
+## 2. الجداول الأساسية في المشروع
+
+### 2.1 الجداول المركزية
+
+- `universities` : الجامعات
+- `colleges` : الكليات
+- `departments` : الأقسام
+- `levels` : المستويات الأكاديمية
+- `courses` : المواد الدراسية
+- `classrooms` : القاعات والمختبرات
+- `students` : الطلاب
+- `lecturers` : المحاضرين / الدكاترة
+- `schedules` : الجداول الدراسية
+- `sessions` : جلسات المحاضرات الفعلية
+- `attendance` : سجلات حضور الطلاب
+- `attendance_events` : أحداث حضور داخل الجلسة
+- `attendance_policy` : سياسة الحضور لكل جامعة/مادة
+
+### 2.2 الجداول الخاصة بالذكاء الاصطناعي والـ Biometrics
+
+- `biometrics_studentbiometric` : نماذج الوجه/العين للطلاب
+- `student_biometrics` : بيانات بصمة الطالب
+- `lecturer_biometrics` : بيانات بصمة المحاضر
+- `inferred_absence_reasons` : أسباب الغياب المستنتجة
+- `lecture_metrics` : مقاييس المحاضرات
+
+### 2.3 الجداول الخاصة بالحسابات والصلاحيات
+
+- `super_admins` : المدراء الكبار
+- `university_admins` : إداريون الجامعات
+- `users_doctor` : أطباء/محاضرون بصيغة تطبيق المستخدم
+- `users_student` : طلاب بصيغة تطبيق المستخدم
+- `users_schedule` : جداول بحسب تطبيق المستخدم
+
+## 3. وصف العلاقات بين الجداول
+
+### 3.1 العلاقة بين الجامعة والكليات والأقسام
+
+```text
+University 1 --- * College
+College 1 --- * Department
+Department 1 --- * Level
+Department 1 --- * Course
+```
+
+- الجامعة لديها عدة كليات
+- الكلية بها عدة أقسام
+- القسم يحتوي على مستويات أكاديمية ومواد
+
+### 3.2 العلاقة بين الطلاب والمحاضرين والجداول
+
+```text
+University 1 --- * Student
+University 1 --- * Lecturer
+Department 1 --- * Student
+Department 1 --- * Course
+Course 1 --- * Schedule
+Lecturer 1 --- * Schedule
+Classroom 1 --- * Schedule
+```
+
+- الطالب ينتمي إلى جامعة معينة وقسم معين
+- المحاضر ينتمي إلى جامعة معينة ويقود ساعات محاضرات
+- كل محاضرة مرتبطة بمادة، محاضر، قاعة، ووقت
+
+### 3.3 العلاقة بين الحضور والجلسات
+
+```text
+Session 1 --- * Attendance
+Student 1 --- * Attendance
+Attendance 1 --- * Attendance_Events
+Attendance 1 --- 0..1 Exception
+Attendance 1 --- 0..1 InferredAbsenceReason
+```
+
+- كل جلسة محاضرة يمكن أن تحتوي على سجل حضور متعدد
+- كل طالب يحصل على سجل حضور في كل جلسة
+- سجل الحضور يمكن أن يحتوي على أحداث (دخول، خروج، رؤية)
+- يمكن أن يكون هناك استثناءات أو أسباب غياب
+
+### 3.4 العلاقة مع التعرف البيومتري
+
+```text
+Student 1 --- 0..1 StudentBiometric
+Lecturer 1 --- 0..1 LecturerBiometric
+``` 
+
+- يحتوي كل طالب على قالب/داتا بيومترية واحدة
+- يحتوي كل محاضر أيضا على بيانات بيومترية
+
+## 4. مخطط ER (Entity Relationship Diagram)
+
+```mermaid
+erDiagram
+    UNIVERSITY ||--o{ COLLEGE : has
+    UNIVERSITY ||--o{ DEPARTMENT : has
+    UNIVERSITY ||--o{ CLASSROOM : has
+    UNIVERSITY ||--o{ STUDENT : has
+    UNIVERSITY ||--o{ LECTURER : has
+    UNIVERSITY ||--o{ SCHEDULE : has
+
+    COLLEGE ||--o{ DEPARTMENT : contains
+    DEPARTMENT ||--o{ LEVEL : has
+    DEPARTMENT ||--o{ COURSE : has
+    DEPARTMENT ||--o{ STUDENT : has
+
+    LEVEL ||--o{ COURSE : includes
+    COURSE ||--o{ SCHEDULE : used_in
+    LECTURER ||--o{ SCHEDULE : teaches
+    CLASSROOM ||--o{ SCHEDULE : hosts
+
+    STUDENT ||--o{ ATTENDANCE : records
+    SESSION ||--o{ ATTENDANCE : contains
+    ATTENDANCE ||--o{ ATTENDANCE_EVENT : logs
+    ATTENDANCE ||--o| EXCEPTION : may_have
+    ATTENDANCE ||--o| INFERRED_ABSENCE_REASON : explains
+
+    STUDENT ||--o| STUDENT_BIOMETRIC : has
+    LECTURER ||--o| LECTURER_BIOMETRIC : has
+
+    UNIVERSITY ||--o{ ATTENDANCE_POLICY : defines
+    COURSE ||--o{ ATTENDANCE_POLICY : applies_to
+```
+
+## 5. مخطط علائقي (Relational Schema)
+
+```text
+UNIVERSITIES(
+  id PK,
+  name,
+  access_key,
+  subscription_date,
+  is_active,
+  created_at
+)
+
+COLLEGES(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  name,
+  code,
+  created_at
+)
+
+DEPARTMENTS(
+  id PK,
+  college_id FK -> COLLEGES.id,
+  name,
+  code,
+  created_at
+)
+
+LEVELS(
+  id PK,
+  department_id FK -> DEPARTMENTS.id,
+  name,
+  created_at
+)
+
+COURSES(
+  id PK,
+  department_id FK -> DEPARTMENTS.id,
+  course_code,
+  course_name,
+  credits,
+  created_at,
+  updated_at
+)
+
+CLASSROOMS(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  room_name,
+  camera_ip,
+  camera_status,
+  created_at,
+  updated_at
+)
+
+STUDENTS(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  department_id FK -> DEPARTMENTS.id,
+  classroom_id FK -> CLASSROOMS.id,
+  student_id,
+  name,
+  level,
+  has_face_template
+)
+
+LECTURERS(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  name,
+  specialization,
+  face_image,
+  secure_login_code,
+  fingerprint_status
+)
+
+SCHEDULES(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  department_id FK -> DEPARTMENTS.id,
+  level_id FK -> LEVELS.id,
+  course_id FK -> COURSES.id,
+  doctor_id FK -> LECTURERS.id,
+  classroom_id FK -> CLASSROOMS.id,
+  day_of_week,
+  start_time,
+  end_time,
+  date
+)
+
+SESSIONS(
+  id PK,
+  schedule_id FK -> SCHEDULES.id,
+  classroom_id FK -> CLASSROOMS.id,
+  actual_start,
+  actual_end,
+  is_active
+)
+
+ATTENDANCE(
+  id PK,
+  session_id FK -> SESSIONS.id,
+  student_id FK -> STUDENTS.id,
+  entry_time,
+  last_seen_time,
+  exit_time,
+  presence_minutes,
+  required_minutes,
+  recognition_mode,
+  recognition_confidence,
+  status,
+  created_at,
+  updated_at
+)
+
+ATTENDANCE_EVENTS(
+  id PK,
+  attendance_id FK -> ATTENDANCE.id,
+  event_type,
+  event_time
+)
+
+ATTENDANCE_POLICY(
+  id PK,
+  university_id FK -> UNIVERSITIES.id,
+  course_id FK -> COURSES.id,
+  required_attendance_percentage,
+  late_threshold_percentage,
+  created_at
+)
+
+BIOMETRICS_STUDENTBIOMETRIC(
+  id PK,
+  user_id FK -> auth_user.id,
+  biometric_type,
+  image,
+  face_vector,
+  eye_vector,
+  created_at
+)
+
+LECTURER_BIOMETRICS(
+  id PK,
+  lecturer_id FK -> LECTURERS.id,
+  image,
+  face_vector,
+  eye_vector,
+  created_at
+)
+
+EXCEPTIONS(
+  id PK,
+  attendance_id FK -> ATTENDANCE.id,
+  lecturer_id FK -> LECTURERS.id,
+  reason,
+  resolved,
+  resolved_at
+)
+
+INFERRED_ABSENCE_REASONS(
+  id PK,
+  attendance_id FK -> ATTENDANCE.id,
+  reason_category,
+  details
+)
+```
+
+## 6. أبرز ملاحظات تصميم قاعدة البيانات
+
+### 6.1 قاعدة البيانات متعددة المستويات
+
+النظام مصمم بشكل هرمي:
+
+- جامعة
+- كلية
+- قسم
+- مستوى
+- مادة
+- جدول
+- جلسة
+- حضور
+
+### 6.2 دعم الحضور البيومتري
+
+تُستخدم الجداول الخاصة بالـ biometric لربط الطالب أو المحاضر مع بيانات الوجه/العين، ثم حساب الحضور تلقائيًا.
+
+### 6.3 الحضور يحسب كـ session-based
+
+المنطق الرئيسي في المشروع يعتمد على:
+
+- جلسة محاضرة
+- ربطها بطلاب ومقرر
+- تعقب حضورهم داخل القاعة
+- احتساب دقائق الحضور والتزام القواعد
+
+### 6.4 دعم قواعد الأمان والحالة
+
+توجد جداول مثل:
+
+- `auth_user`
+- `auth_permission`
+- `auth_group`
+- `django_admin_log`
+
+وتدل على أن المشروع يستخدم نظام Authentication والـ Admin الخاص بـ Django.
+
+## 7. الخلاصة
+
+قاعدة البيانات الحالية تعكس نظام أكاديمي متكامل وموجه إلى إدارة الجامعات، الطلاب، المحاضرين، الجداول، والـ attendance الذكي. كما أنها تدعم التعرف البيومتري وتخزين بيانات الوجه والعيون، مما يجعلها مناسبة لنظام حضور ذكي متقدم.
+
+### عدد الجداول النهائي:
+
+- 45 جدول في القاعدة الكاملة
+- 35 جدولًا أصيلًا للنظام
+- 10 جداول خاصة بـ Django
+
+## 8. المصدر
+
+تم الاعتماد على بيانات `DB.txt` لأخذ أسماء الجداول والحقول الأساسية، مع الاستفادة من نماذج المشروع داخل مجلدات التطبيقات لتوضيح العلاقات بين الكيانات.
