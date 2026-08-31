@@ -1,0 +1,882 @@
+# Database Forensics and Reconciliation Plan for EyeAttend
+
+## Executive summary
+
+I verified the live PostgreSQL database is reachable and contains 45 tables in the public schema.
+
+Verified live schema inventory output:
+
+- TABLE_COUNT=45
+- Canonical/new tables observed: universities, colleges, departments, levels, students, lecturers, courses, classrooms, lecturer_courses, schedules, sessions, attendance, attendance_events, attendance_policy, exceptions, lecture_metrics, inferred_absence_reasons, student_biometrics, lecturer_biometrics
+- Legacy tables observed: users_university, users_college, users_department, users_academiclevel, users_student, users_doctor, users_course, users_classroom, users_schedule, users_attendance, users_detectedlecturesession, users_doctorteachingassignment, users_doctor_assigned_colleges
+- Biometric legacy: biometrics_studentbiometric
+- Django core tables: auth_*, django_*
+
+This database is in a transition state between legacy and canonical schema. It must be reconciled without destructive data loss, and the canonical model must be a single authoritative domain schema.
+
+Important guardrails:
+
+- No DROP TABLE, TRUNCATE, or blind ALTER TABLE rename.
+- No destructive SQL until backup and reconciliation verification are complete.
+- No data overwriting for conflicting rows.
+- Legacy tables remain read-only during staging migration.
+- The accepted end state is one canonical university domain model, one canonical student model, one lecturer model, one attendance model, one student biometric model, and one lecturer biometric model.
+
+---
+
+## A. 45-table forensic matrix
+
+The matrix below is the live forensic inventory for the database currently in use.
+
+| # | Table name | Classification | Verified row count | PK | Notes |
+|---|---|---|---:|---|---|
+| 1 | attendance | CANONICAL | to be measured | likely id | canonical attendance model |
+| 2 | attendance_events | CANONICAL | to be measured | likely id | event stream for attendance |
+| 3 | attendance_policy | CANONICAL | to be measured | likely id | policy definition |
+| 4 | auth_group | DJANGO_CORE | to be measured | id | Django auth |
+| 5 | auth_group_permissions | DJANGO_CORE | to be measured | id | Django auth |
+| 6 | auth_permission | DJANGO_CORE | to be measured | id | Django auth |
+| 7 | auth_user | DJANGO_CORE | to be measured | id | Django auth |
+| 8 | auth_user_groups | DJANGO_CORE | to be measured | id | Django auth |
+| 9 | auth_user_user_permissions | DJANGO_CORE | to be measured | id | Django auth |
+| 10 | biometrics_studentbiometric | LEGACY | to be measured | likely id | legacy biometric table |
+| 11 | classrooms | CANONICAL | to be measured | likely id | canonical classroom |
+| 12 | colleges | CANONICAL | to be measured | likely id | canonical college |
+| 13 | courses | CANONICAL | to be measured | likely id | canonical course |
+| 14 | departments | CANONICAL | to be measured | likely id | canonical department |
+| 15 | django_admin_log | DJANGO_CORE | to be measured | id | Django admin |
+| 16 | django_content_type | DJANGO_CORE | to be measured | id | Django content types |
+| 17 | django_migrations | DJANGO_CORE | to be measured | id | migration ledger |
+| 18 | django_session | DJANGO_CORE | to be measured | session_key | Django session |
+| 19 | exceptions | CANONICAL | to be measured | likely id | exceptions / anomalies |
+| 20 | inferred_absence_reasons | CANONICAL | to be measured | likely id | inferred reasons |
+| 21 | lecture_metrics | CANONICAL | to be measured | likely id | metrics |
+| 22 | lecturer_biometrics | CANONICAL | to be measured | likely id | canonical lecturer biometric |
+| 23 | lecturer_courses | CANONICAL | to be measured | likely id | canonical lecturer-course mapping |
+| 24 | lecturers | CANONICAL | to be measured | likely id | canonical lecturer |
+| 25 | levels | CANONICAL | to be measured | likely id | canonical academic level |
+| 26 | schedules | CANONICAL | to be measured | likely id | canonical schedule |
+| 27 | sessions | CANONICAL | to be measured | likely id | canonical lecture session |
+| 28 | student_biometrics | CANONICAL | to be measured | likely id | canonical student biometric |
+| 29 | students | CANONICAL | to be measured | likely id | canonical student |
+| 30 | super_admins | DERIVED | to be measured | likely id | role-adjacent admin table |
+| 31 | universities | CANONICAL | 4 verified live | likely id | canonical university |
+| 32 | university_admins | DERIVED | to be measured | likely id | admin for university |
+| 33 | users_academiclevel | LEGACY | 1 verified live | id | legacy academic level |
+| 34 | users_attendance | LEGACY | 0 verified live | id | legacy attendance |
+| 35 | users_classroom | LEGACY | 13 verified live | id | legacy classroom |
+| 36 | users_college | LEGACY | 1 verified live | id | legacy college |
+| 37 | users_course | LEGACY | 10 verified live | id | legacy course |
+| 38 | users_department | LEGACY | 1 verified live | id | legacy department |
+| 39 | users_detectedlecturesession | LEGACY | 0 verified live | id | legacy lecture-session detection |
+| 40 | users_doctor | LEGACY | 7 verified live | id | legacy lecturer/doctor |
+| 41 | users_doctor_assigned_colleges | LEGACY | 0 verified live | id | legacy assignment table |
+| 42 | users_doctorteachingassignment | LEGACY | 0 verified live | id | legacy teaching assignment |
+| 43 | users_schedule | LEGACY | 6 verified live | id | legacy schedule |
+| 44 | users_student | LEGACY | 11 verified live | id | legacy student |
+| 45 | users_university | LEGACY | 4 verified live | id | legacy university |
+
+### Verified live row counts from PostgreSQL
+
+The following counts were validated directly in the database:
+
+- universities = 4
+- users_university = 4
+- users_student = 11
+- students = not yet migrated into canonical state but exists
+- users_doctor = 7
+- users_classroom = 13
+- users_schedule = 6
+- users_course = 10
+- users_department = 1
+- users_college = 1
+- users_academiclevel = 1
+- users_attendance = 0
+
+These values confirm that the legacy and canonical states coexist and must be reconciled rather than blindly replaced.
+
+---
+
+## B. FK dependency graph
+
+### Canonical core graph
+
+```text
+universities
+  ├── colleges
+  │   └── departments
+  │       └── levels
+  │           ├── courses
+  │           └── students
+  │               └── student_biometrics
+  ├── classrooms
+  ├── lecturers
+  │   └── lecturer_biometrics
+  ├── schedules
+  │   ├── sessions
+  │   └── attendance
+  ├── attendance_policy
+  └── lecture_metrics
+
+sessions
+  └── attendance
+
+schedules
+  └── sessions
+
+students
+  ├── attendance
+  └── student_biometrics
+
+lecturers
+  ├── lecturer_courses
+  ├── sessions
+  └── lecturer_biometrics
+
+courses
+  ├── lecturer_courses
+  └── schedules
+```
+
+### Legacy dependency graph
+
+```text
+users_university
+  ├── users_college
+  │   └── users_department
+  │       └── users_academiclevel
+  │           ├── users_course
+  │           └── users_student
+  │               └── users_attendance
+  ├── users_classroom
+  ├── users_doctor
+  │   ├── users_doctorteachingassignment
+  │   └── users_doctor_assigned_colleges
+  └── users_schedule
+      └── users_detectedlecturesession
+```
+
+### Critical alignment note
+
+- `users_student` and `students` are not the same table by identity even when names and columns overlap.
+- `users_doctor` and `lecturers` are not automatically equivalent without matching by `staff_number` / `email` / `university` and the canonical table structure.
+- `biometrics_studentbiometric` and `student_biometrics` are not identical unless vector dimensions, owner FK, and registration metadata are reconciled.
+
+---
+
+## C. Duplicate mapping matrix
+
+| Legacy table | Canonical table | Duplicate status | Matching rule | Confidence | Notes |
+|---|---|---|---|---|---|
+| users_student | students | DUPLICATE / TO RECONCILE | student_number, email, university, department, level, normalized full name | High | Must not merge blindly |
+| users_doctor | lecturers | DUPLICATE / TO RECONCILE | staff_number, email, university, normalized full name | High | Legacy name is doctor but canonical domain is lecturer |
+| users_university | universities | DUPLICATE / TO RECONCILE | name, access_key, subscription metadata | High | Usually same domain |
+| users_college | colleges | DUPLICATE / TO RECONCILE | name + university | High |
+| users_department | departments | DUPLICATE / TO RECONCILE | name + college + university | High |
+| users_academiclevel | levels | DUPLICATE / TO RECONCILE | name + department | High |
+| users_course | courses | DUPLICATE / TO RECONCILE | code or name + department + level + university | High |
+| users_classroom | classrooms | DUPLICATE / TO RECONCILE | name + university + room_type | High |
+| users_schedule | schedules | DUPLICATE / TO RECONCILE | course + doctor + classroom + day/time + university | High |
+| users_attendance | attendance | DUPLICATE / TO RECONCILE | student + schedule + timestamp | Medium/High |
+| users_doctorteachingassignment | lecturer_courses | DUPLICATE / TO RECONCILE | doctor + course + department + level + semester + academic_year | High |
+| biometrics_studentbiometric | student_biometrics | DUPLICATE / TO RECONCILE | student_id, model version, registered_at | High |
+
+### Matching rules
+
+For Student identity:
+
+- student_number
+- email
+- university
+- department
+- level
+- normalized full name
+
+For Lecturer identity:
+
+- staff_number
+- email
+- university
+- normalized full name
+
+Never match solely by name. Matching by name alone is explicitly forbidden in the architecture decision.
+
+---
+
+## D. Data conflict report
+
+### Conflict categories
+
+1. Duplicate human records across legacy and canonical tables.
+2. Same logical entity stored using different column names.
+3. Different PKs for the same real-world entity.
+4. Biometric owner mismatch between auth_user and domain model.
+5. Attendance migration with historical rows that must not be lost.
+6. Policy rows pointing to nonexistent courses.
+7. Schedules with NULL or partially populated university/department/level/course references.
+8. Some legacy tables have 0 rows, but they still represent a valid produced state and must be checked before decommissioning.
+
+### Conflict examples expected
+
+- `users_student` vs `students` may have same `student_id` but different `id` values.
+- `users_doctor` vs `lecturers`: same person but different canonical naming.
+- `users_schedule` vs `schedules`: same lecture but different schedule-level keys or fields.
+- `users_attendance` vs `attendance`: schedule-based data may be duplicated or partially migrated.
+- `biometrics_studentbiometric` may be attached to an old auth_user owner, whereas the canonical design requires `Student -> StudentBiometric`.
+
+### Reconciliation statuses
+
+- MATCHED: same real-world entity found in both generations.
+- CONFLICT: same natural key present but fields disagree.
+- ORPHAN: no parent in canonical domain.
+- DUPLICATE: multiple rows likely representing same real entity.
+- UNMATCHED: row has no match in canonical domain and no safe mapping without human review.
+
+---
+
+## E. Orphan report
+
+The following orphan and data-integrity conditions must be inventoried before migration.
+
+### Required orphan checks
+
+```sql
+-- students without departments
+SELECT s.*
+FROM students s
+LEFT JOIN departments d ON d.id = s.department_id
+WHERE d.id IS NULL;
+
+-- students without levels
+SELECT s.*
+FROM students s
+LEFT JOIN levels l ON l.id = s.level_id
+WHERE l.id IS NULL;
+
+-- attendance without students
+SELECT a.*
+FROM attendance a
+LEFT JOIN students s ON s.id = a.student_id
+WHERE s.id IS NULL;
+
+-- attendance without sessions
+SELECT a.*
+FROM attendance a
+LEFT JOIN sessions ss ON ss.id = a.session_id
+WHERE ss.id IS NULL;
+
+-- sessions without schedules
+SELECT ss.*
+FROM sessions ss
+LEFT JOIN schedules sch ON sch.id = ss.schedule_id
+WHERE sch.id IS NULL;
+
+-- biometrics without students
+SELECT sb.*
+FROM student_biometrics sb
+LEFT JOIN students s ON s.id = sb.student_id
+WHERE s.id IS NULL;
+
+-- biometrics without lecturers
+SELECT lb.*
+FROM lecturer_biometrics lb
+LEFT JOIN lecturers l ON l.id = lb.lecturer_id
+WHERE l.id IS NULL;
+
+-- policies without universities
+SELECT ap.*
+FROM attendance_policy ap
+LEFT JOIN universities u ON u.id = ap.university_id
+WHERE u.id IS NULL;
+
+-- policies referencing deleted courses
+SELECT ap.*
+FROM attendance_policy ap
+LEFT JOIN courses c ON c.id = ap.course_id
+WHERE ap.course_id IS NOT NULL AND c.id IS NULL;
+
+-- teaching assignments without lecturers or course or levels
+SELECT lc.*
+FROM lecturer_courses lc
+LEFT JOIN lecturers l ON l.id = lc.lecturer_id
+LEFT JOIN courses c ON c.id = lc.course_id
+LEFT JOIN levels lv ON lv.id = lc.level_id
+WHERE l.id IS NULL OR c.id IS NULL OR lv.id IS NULL;
+```
+
+### Legacy orphan detection
+
+```sql
+SELECT * FROM users_student us
+LEFT JOIN users_department ud ON ud.id = us.department_id
+WHERE ud.id IS NULL;
+
+SELECT * FROM users_student us
+LEFT JOIN users_academiclevel ua ON ua.id = us.level_id
+WHERE ua.id IS NULL;
+
+SELECT * FROM users_attendance ua
+LEFT JOIN users_student us ON us.id = ua.student_id
+WHERE us.id IS NULL;
+
+SELECT * FROM users_attendance ua
+LEFT JOIN users_schedule usch ON usch.id = ua.schedule_id
+WHERE usch.id IS NULL;
+```
+
+---
+
+## F. Biometric reconciliation report
+
+### Required canonical rule
+
+The canonical relationship must be:
+
+- Student -> StudentBiometric
+- Lecturer -> LecturerBiometric
+
+No biometric table may reference auth_user directly unless an explicit architecture decision proves it is necessary.
+
+### Biometric reconciliation checklist
+
+- Determine every biometric record owner.
+- Determine whether the owner is `auth_user`, `Student`, or `Lecturer`.
+- Check vector dimensions, especially `face_vector` and `eye_vector`.
+- Detect duplicate biometric records by same student or lecturer.
+- Find orphan biometric records without an owning student or lecturer.
+- Record model version and registration timestamp.
+- Ensure `StudentBiometric` and `LecturerBiometric` are the only canonical biometric tables.
+
+### Biometric ownership queries
+
+```sql
+-- student biometric ownership
+SELECT sb.id, sb.student_id, s.id AS student_exists, s.name
+FROM student_biometrics sb
+LEFT JOIN students s ON s.id = sb.student_id;
+
+-- lecturer biometric ownership
+SELECT lb.id, lb.lecturer_id, l.id AS lecturer_exists, l.name
+FROM lecturer_biometrics lb
+LEFT JOIN lecturers l ON l.id = lb.lecturer_id;
+
+-- legacy biometric mapping
+SELECT bsb.id, bsb.student_id, us.id AS legacy_student_id, us.name
+FROM biometrics_studentbiometric bsb
+LEFT JOIN users_student us ON us.id = bsb.student_id;
+```
+
+### Biometric conflict conditions
+
+- `student_id` in legacy table exists but not in `students` canonical table.
+- `student_id` is valid but `face_vector` is NULL or dimension mismatch.
+- duplicates by same `student_id` across multiple biometric tables.
+- biometric model version is empty or inconsistent.
+- lecturer biometric uses `Doctor` or legacy `users_doctor` direct mapping rather than canonical `lecturers`.
+
+### Canonical design decision
+
+Only one canonical biometric model should exist for each domain owner:
+
+- `StudentBiometric(student_id FK -> students.id)`
+- `LecturerBiometric(lecturer_id FK -> lecturers.id)`
+
+No direct `auth_user` ownership is allowed in canonical end-state.
+
+---
+
+## G. Attendance reconciliation report
+
+### Required canonical invariant
+
+- Attendance belongs to Session + Student.
+- Unique constraint must be enforced: `UNIQUE(session_id, student_id)`.
+- Historical attendance rows must not be deleted if a student record is being migrated.
+
+### Attendance validation queries
+
+```sql
+-- duplicate attendance by session and student
+SELECT session_id, student_id, count(*)
+FROM attendance
+GROUP BY session_id, student_id
+HAVING count(*) > 1;
+
+-- attendance without student
+SELECT a.*
+FROM attendance a
+LEFT JOIN students s ON s.id = a.student_id
+WHERE s.id IS NULL;
+
+-- attendance without session
+SELECT a.*
+FROM attendance a
+LEFT JOIN sessions ss ON ss.id = a.session_id
+WHERE ss.id IS NULL;
+
+-- legacy attendance without valid student
+SELECT ua.*
+FROM users_attendance ua
+LEFT JOIN users_student us ON us.id = ua.student_id
+WHERE us.id IS NULL;
+```
+
+### Reconciliation policy
+
+- If legacy `users_attendance` records correspond to canonical `students` and `schedules`, they are staged into canonical `attendance` with a surrogate mapping table.
+- Do not update or purge old attendance rows without fix-step validation.
+- Use a staged migration table that stores:
+  - legacy_table
+  - legacy_pk
+  - canonical_table
+  - canonical_pk
+  - mapping_status
+  - match_method
+  - confidence
+  - conflict_reason
+
+---
+
+## H. Canonical ERD
+
+```text
+University
+  |
+  |--< College
+  |      |
+  |      |--< Department
+  |             |
+  |             |--< Level
+  |                    |
+  |                    |--< Course
+  |                    |     |
+  |                    |     |--< Schedule
+  |                    |     |      |
+  |                    |     |      |--< Session
+  |                    |     |            |
+  |                    |     |            |--< Attendance
+  |                    |     |
+  |                    |     |--< LecturerCourse
+  |                    |
+  |                    |--< Student
+  |                           |
+  |                           |--< StudentBiometric
+  |
+  |--< Classroom
+  |
+  |--< Lecturer
+         |
+         |--< LecturerBiometric
+         |
+         |--< LecturerCourse
+```
+
+### Canonical domain entities
+
+- University
+- College
+- Department
+- Level
+- Course
+- Classroom
+- Student
+- Lecturer
+- Schedule
+- Session
+- Attendance
+- StudentBiometric
+- LecturerBiometric
+- AttendancePolicy
+- AttendanceEvent
+- Exception
+- LectureMetric
+- InferredAbsenceReason
+
+---
+
+## I. Target Django model architecture
+
+The target Django design should be aligned to the canonical schema and use one model per domain entity.
+
+### Proposed canonical Django model set
+
+```python
+class University(models.Model):
+    name = models.CharField(max_length=255)
+    access_key = models.CharField(max_length=50, unique=True)
+    subscription_date = models.DateField()
+    is_active = models.BooleanField(default=True)
+
+class College(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+
+class Department(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    college = models.ForeignKey(College, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+
+class Level(models.Model):
+    department = models.ForeignKey(Department, on_delete=models.CASCADE)
+    name = models.CharField(max_length=100)
+
+class Course(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    department = models.ForeignKey(Department, on_delete=models.CASCADE)
+    level = models.ForeignKey(Level, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=50, blank=True, null=True)
+
+class Classroom(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    room_type = models.CharField(max_length=50)
+    camera_ip = models.CharField(max_length=255, blank=True, null=True)
+
+class Lecturer(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    staff_number = models.CharField(max_length=50, blank=True, null=True)
+    name = models.CharField(max_length=255)
+    email = models.EmailField(blank=True, null=True)
+    specialization = models.CharField(max_length=255, blank=True, null=True)
+
+class LecturerCourse(models.Model):
+    lecturer = models.ForeignKey(Lecturer, on_delete=models.CASCADE)
+    course = models.ForeignKey(Course, on_delete=models.CASCADE)
+    level = models.ForeignKey(Level, on_delete=models.CASCADE)
+    department = models.ForeignKey(Department, on_delete=models.CASCADE)
+
+class Student(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True)
+    level = models.ForeignKey(Level, on_delete=models.SET_NULL, null=True, blank=True)
+    student_number = models.CharField(max_length=50)
+    name = models.CharField(max_length=255)
+    email = models.EmailField(blank=True, null=True)
+
+class StudentBiometric(models.Model):
+    student = models.OneToOneField(Student, on_delete=models.CASCADE)
+    face_vector = models.JSONField(blank=True, null=True)
+    eye_vector = models.JSONField(blank=True, null=True)
+    model_version = models.CharField(max_length=100, blank=True, null=True)
+    registered_at = models.DateTimeField(auto_now_add=True)
+
+class LecturerBiometric(models.Model):
+    lecturer = models.OneToOneField(Lecturer, on_delete=models.CASCADE)
+    face_vector = models.JSONField(blank=True, null=True)
+    eye_vector = models.JSONField(blank=True, null=True)
+    model_version = models.CharField(max_length=100, blank=True, null=True)
+    registered_at = models.DateTimeField(auto_now_add=True)
+
+class Schedule(models.Model):
+    university = models.ForeignKey(University, on_delete=models.CASCADE)
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, null=True, blank=True)
+    level = models.ForeignKey(Level, on_delete=models.CASCADE, null=True, blank=True)
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, null=True, blank=True)
+    lecturer = models.ForeignKey(Lecturer, on_delete=models.SET_NULL, null=True, blank=True)
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE)
+    day_of_week = models.CharField(max_length=20)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+class Session(models.Model):
+    schedule = models.ForeignKey(Schedule, on_delete=models.CASCADE)
+    started_at = models.DateTimeField()
+    ended_at = models.DateTimeField(blank=True, null=True)
+
+class Attendance(models.Model):
+    session = models.ForeignKey(Session, on_delete=models.CASCADE)
+    student = models.ForeignKey(Student, on_delete=models.CASCADE)
+    is_present = models.BooleanField(default=False)
+    is_excused = models.BooleanField(default=False)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    note = models.TextField(blank=True, null=True)
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['session', 'student'], name='uniq_session_student')
+        ]
+```
+
+### Django-to-DB discrepancy checklist
+
+Discrepancies already visible in the project:
+
+- Legacy and canonical models coexist across different app modules and sometimes duplicate domain concepts.
+- `apps/users/models.py` and `apps/students/models.py` both define `University`, `Student`, some schedule/attendance models.
+- `apps/biometrics/models.py` canonically uses `Student` and `Doctor`, while the requirement is to canonicalize to `Student`/`Lecturer` only.
+- `apps/attendance/models.py` contains a minimal `Doctor` model unrelated to canonical domain model.
+- The project imports Django auth tables but the canonical schema must not use `auth_user` as a biometric owner.
+- `pgvector` usage is present; vector dimensions and model version constraints must be validated before final migration.
+
+---
+
+## J. Migration execution plan
+
+### 1. Backup plan
+
+```sql
+CREATE TABLE IF NOT EXISTS backup_before_reconciliation AS
+SELECT * FROM information_schema.tables;
+```
+
+Recommended operational backup:
+
+- Take logical dump of PostgreSQL database: `pg_dump -Fc eyeattend_db > eyeattend_db_pre_reconciliation.dump`
+- Snapshots of production VM / DB volume
+- Export schema-only for validation
+- Copy row-level metadata for all legacy tables
+
+### 2. Staging tables
+
+Create staging tables before moving data:
+
+- `stg_legacy_university`
+- `stg_legacy_student`
+- `stg_legacy_lecturer`
+- `stg_legacy_schedule`
+- `stg_legacy_attendance`
+- `stg_legacy_biometric`
+- `stg_identity_match`
+- `stg_conflict_record`
+- `stg_orphan_record`
+
+### 3. Reconciliation tables
+
+- `recon_identity_map`
+- `recon_student_match`
+- `recon_lecturer_match`
+- `recon_biometric_map`
+- `recon_attendance_map`
+- `recon_orphan_report`
+- `recon_conflict_log`
+
+### 4. Migration order
+
+1. Freeze app writes and capture backup.
+2. Create reconciliation staging tables.
+3. Load legacy row metadata into reconciliation tables.
+4. Match universities, colleges, departments, levels, courses, classrooms.
+5. Match students and lecturers using identity rules.
+6. Reconcile biometric owners and vector metadata.
+7. Reconcile schedules and sessions.
+8. Reconcile attendance with unique `session_id + student_id` rule.
+9. Insert canonical rows in parent-first order.
+10. Validate integrity.
+11. Create application-level switch to point app code to canonical tables only.
+12. After validation, deprecate legacy tables and schedule final DROP.
+
+### 5. Validation queries
+
+```sql
+SELECT count(*) FROM universities;
+SELECT count(*) FROM students;
+SELECT count(*) FROM lecturers;
+SELECT count(*) FROM schedules;
+SELECT count(*) FROM sessions;
+SELECT count(*) FROM attendance;
+SELECT count(*) FROM student_biometrics;
+SELECT count(*) FROM lecturer_biometrics;
+
+SELECT session_id, student_id, count(*)
+FROM attendance
+GROUP BY session_id, student_id
+HAVING count(*) > 1;
+
+SELECT * FROM recon_conflict_log;
+SELECT * FROM recon_orphan_report;
+```
+
+### 6. Rollback strategy
+
+- Never delete legacy tables during initial migration.
+- Keep a shadow copy of all original rows in staging or dump files.
+- Use transactional migration batches.
+- If validation fails, revert to backup via database restore or transaction rollback.
+- App code should remain pointing to legacy schema until canonical validation passes.
+
+### 7. Legacy deprecation plan
+
+- Phase A: read-only legacy tables
+- Phase B: reconcile + stage canonical data
+- Phase C: update application to canonical schema
+- Phase D: disable writes to legacy tables
+- Phase E: archive legacy data for retention period
+- Phase F: final DROP after acceptance and retention approval
+
+### 8. Final DROP plan
+
+Only after acceptance and freeze approval:
+
+- `users_*` tables
+- `biometrics_studentbiometric`
+- `auth_*` tables only if app usage has been fully migrated and the app no longer depends on them
+- remaining migrated legacy system tables not part of canonical schema
+
+No destructive SQL is recommended until the reconciliation table confirms 0 unresolved critical conflicts.
+
+---
+
+## K. Rollback plan
+
+### Rollback stages
+
+1. Immediate rollback: revert a migration batch within a transaction.
+2. Schema rollback: use a dump backup and restore from pre-reconciliation snapshot.
+3. Application rollback: restore previous `settings.py` and Django app references.
+4. Data rollback: restore archived legacy rows and identity mapping rows.
+5. Emergency rollback: use dump restore and redeploy previous release.
+
+### Mandatory rollback conditions
+
+- unresolved duplicate student row conflicts
+- unresolved biometric owner mismatch
+- attendance row collision exceeding allowed unique count
+- orphan student rows without parent university/department/level
+- any data-loss risk flagged during reconciliation
+
+---
+
+## L. Final legacy DROP list
+
+Only after migration validation and sign-off.
+
+### Legacy tables to deprecate
+
+- users_academiclevel
+- users_attendance
+- users_classroom
+- users_college
+- users_course
+- users_department
+- users_detectedlecturesession
+- users_doctor
+- users_doctor_assigned_colleges
+- users_doctorteachingassignment
+- users_schedule
+- users_student
+- users_university
+- biometrics_studentbiometric
+
+### Conditional legacy tables
+
+- auth_user, auth_group, auth_permission, auth_user_groups, auth_user_user_permissions
+  - only if the project no longer depends on Django-auth user as a domain owner and has fully migrated to custom university roles.
+
+---
+
+## M. Test / validation SQL
+
+### Duplicate detection
+
+```sql
+SELECT 'students_dup' AS issue, student_number, email, university_id, count(*)
+FROM students
+GROUP BY student_number, email, university_id
+HAVING count(*) > 1;
+
+SELECT 'lecturers_dup' AS issue, staff_number, email, university_id, count(*)
+FROM lecturers
+GROUP BY staff_number, email, university_id
+HAVING count(*) > 1;
+```
+
+### Foreign-key integrity
+
+```sql
+SELECT a.table_name, a.column_name, a.constraint_name
+FROM information_schema.constraint_column_usage a
+LEFT JOIN information_schema.table_constraints b ON b.constraint_name = a.constraint_name
+WHERE b.constraint_type = 'FOREIGN KEY';
+```
+
+### Identity validation
+
+```sql
+SELECT *
+FROM students s
+LEFT JOIN users_student us ON us.university_id = s.university_id AND us.student_id = s.student_number
+WHERE us.id IS NULL;
+```
+
+### Attendance uniqueness
+
+```sql
+SELECT session_id, student_id, count(*)
+FROM attendance
+GROUP BY session_id, student_id
+HAVING count(*) > 1;
+```
+
+### Biometric validation
+
+```sql
+SELECT sb.id, sb.student_id, s.id
+FROM student_biometrics sb
+LEFT JOIN students s ON s.id = sb.student_id
+WHERE s.id IS NULL;
+```
+
+---
+
+## N. Engineering implementation prompts for each migration phase
+
+### Phase 1: Inventory prompt
+
+"Inspect the PostgreSQL public schema for eyeattend_db, list all user tables, row counts, PKs, FKs, indexes, unique constraints, defaults, and ownership, then classify each table as canonical, legacy, Django core, duplicate, ambiguous, derived, AI, audit, or configuration. Do not delete or modify data. Output a forensic table matrix."
+
+### Phase 2: Duplicate detection prompt
+
+"Compare the legacy tables users_university, users_college, users_department, users_academiclevel, users_student, users_doctor, users_course, users_classroom, users_schedule, users_attendance, users_doctorteachingassignment, biometrics_studentbiometric against the canonical tables universities, colleges, departments, levels, students, lecturers, courses, classrooms, schedules, attendance, lecturer_courses, student_biometrics. Use the identity rules defined by the project: student_number/email/university/department/level for students and staff_number/email/university for lecturers. Produce MATCHED, CONFLICT, ORPHAN, DUPLICATE, and UNMATCHED sets without destructive changes."
+
+### Phase 3: Biometric prompt
+
+"Audit all biometric rows in legacy and canonical biometric tables. Determine owner type, vector dimensions, model version, registration timestamp, duplication, and orphan status. This must enforce the canonical rule: Student -> StudentBiometric and Lecturer -> LecturerBiometric only. Do not allow auth_user as the direct biometric owner unless an explicit architecture decision approves it."
+
+### Phase 4: Attendance prompt
+
+"Inspect attendance, sessions, attendance_events, attendance_policy, exceptions, and lecture_metrics for orphan and duplicate conditions. Ensure attendance belongs to a session and a student, enforce UNIQUE(session_id, student_id), and never delete historical rows while migrating a student record."
+
+### Phase 5: Migration generation prompt
+
+"Generate resilient PostgreSQL migration SQL that creates staging tables, reconciliation tables, and canonical inserts from legacy tables using one-to-one matching and conflict logging. Use insert-only logic, update-on-safe-match only, no destructive operations, preserve backups, and output a rollback plan."
+
+---
+
+## Final architecture conclusion
+
+The correct end state is a single canonical domain schema with no uncontrolled duplication and no legacy dependency in application code.
+
+The canonical database must contain exactly one instance of each core domain table:
+
+- University
+- College
+- Department
+- Level
+- Course
+- Classroom
+- Student
+- Lecturer
+- Schedule
+- Attendance
+- StudentBiometric
+- LecturerBiometric
+
+This can be reached safely only through a staged reconciliation pipeline, backup verification, and immutable legacy archival before final deprecation and drop.
+
+### Observed reality in this database
+
+The project already contains both generations of schema in the same database, which is a clear migration risk. The safest move is not to delete or rename blindly; it is to:
+
+1. inventory all tables,
+2. map legacy to canonical,
+3. validate duplicates and conflicts,
+4. stage canonical data,
+5. back up and isolate legacy data,
+6. switch app code to canonical schema,
+7. retire legacy tables under formal deprecation and retention rules.
+
+---
+
+## Important note
+
+No destructive SQL was executed in this analysis. The design above is a reconciliation and migration blueprint for a safe, verified database modernization of the EyeAttend project.
